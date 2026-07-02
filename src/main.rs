@@ -9,13 +9,13 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use srt_tools::{self as lib, Cue, Format, Timestamp};
+use srt_tools::{self as lib, Cue, Format, Stats, Timestamp};
 
 #[derive(Parser)]
 #[command(
     name = "srt-tools",
     version,
-    about = "Shift, convert, merge, fix, and scale SRT/VTT subtitle files.",
+    about = "Shift, convert, merge, fix, scale, and inspect SRT/VTT subtitle files.",
     long_about = None,
 )]
 struct Cli {
@@ -72,6 +72,12 @@ enum Command {
         /// Output file (omit for stdout).
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
+    },
+
+    /// Report cue count, time span, on-screen duration, and coverage.
+    Stats {
+        /// Input file (omit or '-' for stdin).
+        input: Option<String>,
     },
 
     /// Linearly scale all timestamps by a factor (framerate drift, e.g. 1.001).
@@ -157,6 +163,12 @@ fn run() -> Result<()> {
             write_cues(&fixed, output.as_deref(), None)?;
         }
 
+        Command::Stats { input } => {
+            let cues = read_cues(input.as_deref())?;
+            let report = format_stats(&lib::stats(&cues));
+            print!("{report}");
+        }
+
         Command::Scale {
             input,
             factor,
@@ -222,6 +234,35 @@ fn parse_duration(raw: &str) -> Result<i64> {
     };
 
     Ok(sign * ms)
+}
+
+/// Render [`Stats`] as an aligned, human-readable report (trailing newline).
+/// Durations reuse the SRT `HH:MM:SS,mmm` timestamp form.
+fn format_stats(s: &Stats) -> String {
+    let first = s
+        .first_start
+        .map(|t| t.to_srt())
+        .unwrap_or_else(|| "-".to_string());
+    let last = s
+        .last_end
+        .map(|t| t.to_srt())
+        .unwrap_or_else(|| "-".to_string());
+    let span = Timestamp::from_ms(s.span_ms).to_srt();
+    let display = Timestamp::from_ms(s.display_ms).to_srt();
+    format!(
+        "cues:      {}\n\
+         first:     {}\n\
+         last:      {}\n\
+         span:      {}\n\
+         on-screen: {}\n\
+         coverage:  {:.1}%\n",
+        s.count,
+        first,
+        last,
+        span,
+        display,
+        s.coverage() * 100.0,
+    )
 }
 
 /// Split a leading '+' / '-' from a value, returning (+1|-1, rest).

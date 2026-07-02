@@ -245,6 +245,46 @@ fn fix_sorts_renumbers_and_drops_empty() {
 }
 
 #[test]
+fn stats_reports_counts_and_coverage() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("in.srt");
+    fs::write(&input, SAMPLE).unwrap();
+
+    let out = bin()
+        .args(["stats", input.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    // Two cues in SAMPLE.
+    assert!(text.contains("cues:      2"), "got:\n{text}");
+    // Span 1.000 -> 7.250 = 6.250.
+    assert!(text.contains("span:      00:00:06,250"), "got:\n{text}");
+    // On-screen (4.000-1.000)+(7.250-5.500) = 4.750.
+    assert!(text.contains("on-screen: 00:00:04,750"), "got:\n{text}");
+    // Coverage 4750/6250 = 76.0%.
+    assert!(text.contains("coverage:  76.0%"), "got:\n{text}");
+}
+
+#[test]
+fn stats_reads_from_stdin() {
+    let out = bin()
+        .args(["stats"])
+        .write_stdin(SAMPLE)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("cues:      2"), "got:\n{text}");
+    assert!(text.contains("first:     00:00:01,000"), "got:\n{text}");
+    assert!(text.contains("last:      00:00:07,250"), "got:\n{text}");
+}
+
+#[test]
 fn scale_doubles_timestamps() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("in.srt");

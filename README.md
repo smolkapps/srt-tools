@@ -2,7 +2,8 @@
 
 A small, fast, dependency-light Rust CLI for manipulating subtitle files
 (SubRip `.srt` and WebVTT `.vtt`). Shift timing, convert between formats, merge
-multiple files, fix broken/scrambled subtitles, and correct framerate drift.
+multiple files, fix broken/scrambled subtitles, correct framerate drift, and
+report file statistics.
 
 The SRT/VTT parser is hand-written (no regex, no heavy subtitle crate) and is
 tolerant of real-world quirks: CRLF or LF line endings, a UTF-8 BOM, blank lines
@@ -63,6 +64,25 @@ Renumbers sequentially, sorts by start time, clamps overlaps (a cue can't run
 past the next cue's start), ensures `end >= start`, drops empty cues, and
 normalizes line endings.
 
+### stats — inspect a file without changing it
+
+```sh
+srt-tools stats in.srt
+cat in.srt | srt-tools stats
+```
+
+Prints the cue count, the first start and last end, the total span, the summed
+on-screen time, and the coverage (on-screen time as a percentage of the span):
+
+```
+cues:      3
+first:     00:00:01,000
+last:      00:00:12,500
+span:      00:00:11,500
+on-screen: 00:00:07,250
+coverage:  63.0%
+```
+
 ### scale — correct framerate drift (linear)
 
 ```sh
@@ -92,7 +112,8 @@ let out = to_srt(&cues);
 ```
 
 Key items: `Timestamp` (ms-precision, `to_srt`/`to_vtt`), `Cue`,
-`parse`, `to_srt`, `to_vtt`, `shift`, `scale`, `merge`, `fix`, `renumber`.
+`parse`, `to_srt`, `to_vtt`, `shift`, `scale`, `merge`, `fix`, `renumber`,
+`stats` (with the `Stats` summary type).
 
 ## Testing
 

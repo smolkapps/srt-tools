@@ -2,7 +2,7 @@
 name = "srt-tools"
 version = "0.1.0"
 edition = "2021"
-description = "A subtitle (SRT/VTT) manipulation toolkit: shift, convert, merge, fix, and scale."
+description = "A subtitle (SRT/VTT) manipulation toolkit: shift, convert, merge, fix, scale, and stats."
 license = "MIT"
 readme = "README.md"
 repository = ""

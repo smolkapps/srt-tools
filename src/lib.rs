@@ -387,6 +387,57 @@ pub fn shift(cues: &mut [Cue], delta_ms: i64, from: Option<Timestamp>) {
     }
 }
 
+/// Summary statistics for a cue list, produced by [`stats`].
+///
+/// `span_ms` is wall-clock from the earliest start to the latest end;
+/// `display_ms` is the sum of every cue's on-screen duration (negative
+/// durations counted as zero). `coverage()` relates the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    /// Number of cues.
+    pub count: usize,
+    /// Earliest start across all cues (`None` for an empty list).
+    pub first_start: Option<Timestamp>,
+    /// Latest end across all cues (`None` for an empty list).
+    pub last_end: Option<Timestamp>,
+    /// Latest end minus earliest start, in milliseconds (0 for an empty list).
+    pub span_ms: i64,
+    /// Sum of on-screen durations, in milliseconds (negatives clamped to 0).
+    pub display_ms: i64,
+}
+
+impl Stats {
+    /// Fraction of the span during which a subtitle is on screen, in `0.0..=1.0`
+    /// (0.0 when the span is zero). Values above 1.0 are possible if cues
+    /// overlap; they are clamped to 1.0.
+    pub fn coverage(&self) -> f64 {
+        if self.span_ms <= 0 {
+            0.0
+        } else {
+            (self.display_ms as f64 / self.span_ms as f64).min(1.0)
+        }
+    }
+}
+
+/// Compute summary [`Stats`] over a cue list without modifying it. Cues need not
+/// be sorted; the span is taken from the minimum start to the maximum end.
+pub fn stats(cues: &[Cue]) -> Stats {
+    let first_start = cues.iter().map(|c| c.start).min();
+    let last_end = cues.iter().map(|c| c.end).max();
+    let span_ms = match (first_start, last_end) {
+        (Some(s), Some(e)) => (e.ms - s.ms).max(0),
+        _ => 0,
+    };
+    let display_ms = cues.iter().map(|c| c.duration_ms().max(0)).sum();
+    Stats {
+        count: cues.len(),
+        first_start,
+        last_end,
+        span_ms,
+        display_ms,
+    }
+}
+
 /// Linearly scale every timestamp by `factor` (e.g. 23.976→25 fps drift).
 pub fn scale(cues: &mut [Cue], factor: f64) {
     for cue in cues.iter_mut() {
@@ -536,6 +587,48 @@ mod tests {
         assert_eq!(cues[0].start.to_srt(), "00:00:01,000");
         // Second cue (starts at 5.5s >= 5s) moves +1s.
         assert_eq!(cues[1].start.to_srt(), "00:00:06,500");
+    }
+
+    #[test]
+    fn stats_summarizes_sample() {
+        let cues = parse(SAMPLE).unwrap();
+        let s = stats(&cues);
+        assert_eq!(s.count, 2);
+        assert_eq!(s.first_start, Some(Timestamp::from_hmsm(0, 0, 1, 0)));
+        assert_eq!(s.last_end, Some(Timestamp::from_hmsm(0, 0, 7, 250)));
+        // Span: 1.000 -> 7.250 = 6250ms.
+        assert_eq!(s.span_ms, 6250);
+        // On-screen: (4.000-1.000) + (7.250-5.500) = 3000 + 1750 = 4750ms.
+        assert_eq!(s.display_ms, 4750);
+        // Coverage: 4750 / 6250 = 0.76.
+        assert!((s.coverage() - 0.76).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stats_handles_unsorted_and_overlapping_cues() {
+        // Out of order; the second cue overlaps and extends past the first.
+        let cues = vec![
+            Cue::new(1, Timestamp::from_ms(5000), Timestamp::from_ms(6000), "b"),
+            Cue::new(2, Timestamp::from_ms(1000), Timestamp::from_ms(8000), "a"),
+        ];
+        let s = stats(&cues);
+        assert_eq!(s.first_start, Some(Timestamp::from_ms(1000)));
+        assert_eq!(s.last_end, Some(Timestamp::from_ms(8000)));
+        assert_eq!(s.span_ms, 7000);
+        // Display sum (1000 + 7000 = 8000) exceeds the span -> coverage clamps to 1.
+        assert_eq!(s.display_ms, 8000);
+        assert_eq!(s.coverage(), 1.0);
+    }
+
+    #[test]
+    fn stats_empty_list_is_zeroed() {
+        let s = stats(&[]);
+        assert_eq!(s.count, 0);
+        assert_eq!(s.first_start, None);
+        assert_eq!(s.last_end, None);
+        assert_eq!(s.span_ms, 0);
+        assert_eq!(s.display_ms, 0);
+        assert_eq!(s.coverage(), 0.0);
     }
 
     #[test]
