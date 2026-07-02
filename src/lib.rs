@@ -391,7 +391,9 @@ pub fn shift(cues: &mut [Cue], delta_ms: i64, from: Option<Timestamp>) {
 ///
 /// `span_ms` is wall-clock from the earliest start to the latest end;
 /// `display_ms` is the sum of every cue's on-screen duration (negative
-/// durations counted as zero). `coverage()` relates the two.
+/// durations counted as zero); `covered_ms` is the length of the *union* of
+/// on-screen intervals (overlaps counted once). `coverage()` relates the union
+/// to the span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     /// Number of cues.
@@ -403,18 +405,23 @@ pub struct Stats {
     /// Latest end minus earliest start, in milliseconds (0 for an empty list).
     pub span_ms: i64,
     /// Sum of on-screen durations, in milliseconds (negatives clamped to 0).
+    /// This double-counts time when cues overlap; use `covered_ms` for the union.
     pub display_ms: i64,
+    /// Length of the union of on-screen intervals, in milliseconds (overlapping
+    /// cues counted once, negative durations counted as zero). Always `<= span_ms`.
+    pub covered_ms: i64,
 }
 
 impl Stats {
-    /// Fraction of the span during which a subtitle is on screen, in `0.0..=1.0`
-    /// (0.0 when the span is zero). Values above 1.0 are possible if cues
-    /// overlap; they are clamped to 1.0.
+    /// Fraction of the span during which at least one subtitle is on screen, in
+    /// `0.0..=1.0` (0.0 when the span is zero). Because it uses the union of
+    /// on-screen intervals (`covered_ms`), overlapping cues are never
+    /// double-counted, so the value naturally stays at or below 1.0.
     pub fn coverage(&self) -> f64 {
         if self.span_ms <= 0 {
             0.0
         } else {
-            (self.display_ms as f64 / self.span_ms as f64).min(1.0)
+            (self.covered_ms as f64 / self.span_ms as f64).min(1.0)
         }
     }
 }
@@ -429,13 +436,45 @@ pub fn stats(cues: &[Cue]) -> Stats {
         _ => 0,
     };
     let display_ms = cues.iter().map(|c| c.duration_ms().max(0)).sum();
+    let covered_ms = union_ms(cues);
     Stats {
         count: cues.len(),
         first_start,
         last_end,
         span_ms,
         display_ms,
+        covered_ms,
     }
+}
+
+/// Length of the union of every cue's on-screen interval, in milliseconds.
+/// Overlapping cues are counted once; a cue with `end < start` is treated as a
+/// zero-length interval (so it contributes nothing).
+fn union_ms(cues: &[Cue]) -> i64 {
+    let mut intervals: Vec<(i64, i64)> = cues
+        .iter()
+        .map(|c| (c.start.ms, c.end.ms.max(c.start.ms)))
+        .collect();
+    intervals.sort_by_key(|&(start, _)| start);
+
+    let mut total = 0;
+    let mut cur: Option<(i64, i64)> = None;
+    for (start, end) in intervals {
+        match cur {
+            Some((cur_start, cur_end)) if start <= cur_end => {
+                cur = Some((cur_start, cur_end.max(end)));
+            }
+            Some((cur_start, cur_end)) => {
+                total += cur_end - cur_start;
+                cur = Some((start, end));
+            }
+            None => cur = Some((start, end)),
+        }
+    }
+    if let Some((cur_start, cur_end)) = cur {
+        total += cur_end - cur_start;
+    }
+    total
 }
 
 /// Linearly scale every timestamp by `factor` (e.g. 23.976→25 fps drift).
@@ -628,7 +667,48 @@ mod tests {
         assert_eq!(s.last_end, None);
         assert_eq!(s.span_ms, 0);
         assert_eq!(s.display_ms, 0);
+        assert_eq!(s.covered_ms, 0);
         assert_eq!(s.coverage(), 0.0);
+    }
+
+    #[test]
+    fn coverage_uses_union_not_sum_for_overlaps() {
+        // Two identical 0-10s cues fully overlap; a third runs 50-60s. Span 0-60s.
+        let cues = vec![
+            Cue::new(1, Timestamp::from_ms(0), Timestamp::from_ms(10_000), "a"),
+            Cue::new(2, Timestamp::from_ms(0), Timestamp::from_ms(10_000), "b"),
+            Cue::new(
+                3,
+                Timestamp::from_ms(50_000),
+                Timestamp::from_ms(60_000),
+                "c",
+            ),
+        ];
+        let s = stats(&cues);
+        assert_eq!(s.span_ms, 60_000);
+        // Summed on-screen double-counts the overlap: 10 + 10 + 10 = 30s.
+        assert_eq!(s.display_ms, 30_000);
+        // Union counts the overlap once: 10s + 10s = 20s.
+        assert_eq!(s.covered_ms, 20_000);
+        // 20 / 60 = 33.3%, not 50% (which sum/span would give).
+        assert!((s.coverage() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stats_clamps_negative_duration_cue() {
+        // A reversed cue (end < start) must contribute zero, not negative, to
+        // both the summed and the union on-screen totals.
+        let cues = vec![
+            Cue::new(1, Timestamp::from_ms(5000), Timestamp::from_ms(2000), "rev"),
+            Cue::new(2, Timestamp::from_ms(6000), Timestamp::from_ms(8000), "ok"),
+        ];
+        let s = stats(&cues);
+        // Span: earliest start 5000 -> latest end 8000 = 3000ms.
+        assert_eq!(s.span_ms, 3000);
+        // Reversed cue clamped to 0, plus the 2000ms real cue.
+        assert_eq!(s.display_ms, 2000);
+        assert_eq!(s.covered_ms, 2000);
+        assert!((s.coverage() - 2000.0 / 3000.0).abs() < 1e-9);
     }
 
     #[test]

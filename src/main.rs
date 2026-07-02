@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use srt_tools::{self as lib, Cue, Format, Stats, Timestamp};
+use srt_tools::{self as lib, Cue, Format, ParseError, Stats, Timestamp};
 
 #[derive(Parser)]
 #[command(
@@ -164,9 +164,21 @@ fn run() -> Result<()> {
         }
 
         Command::Stats { input } => {
-            let cues = read_cues(input.as_deref())?;
+            // A cue-less file is not an error for `stats`: report zero cues
+            // rather than exiting non-zero the way transforming commands do.
+            let raw = read_raw(input.as_deref())?;
+            let cues = match lib::parse(&raw) {
+                Ok(cues) => cues,
+                Err(ParseError::Empty) => Vec::new(),
+                Err(e) => bail!("failed to parse subtitles: {e}"),
+            };
             let report = format_stats(&lib::stats(&cues));
-            print!("{report}");
+            // Write through locked stdout (not `print!`, which panics on EPIPE
+            // when the reader goes away, e.g. `stats f | true`).
+            let stdout = std::io::stdout();
+            let mut h = stdout.lock();
+            h.write_all(report.as_bytes())
+                .context("writing stats report to stdout")?;
         }
 
         Command::Scale {
@@ -294,21 +306,27 @@ fn resolve_format(to: Option<&str>, output: Option<&str>) -> Result<Format> {
     }
 }
 
-/// Read subtitle cues from a file path, or from stdin when `path` is `None` or
-/// `"-"`.
-fn read_cues(path: Option<&str>) -> Result<Vec<Cue>> {
-    let raw = match path {
+/// Read raw subtitle text from a file path, or from stdin when `path` is `None`
+/// or `"-"`.
+fn read_raw(path: Option<&str>) -> Result<String> {
+    match path {
         Some("-") | None => {
             let mut buf = String::new();
             std::io::stdin()
                 .read_to_string(&mut buf)
                 .context("reading subtitles from stdin")?;
-            buf
+            Ok(buf)
         }
         Some(p) => {
-            std::fs::read_to_string(p).with_context(|| format!("reading subtitle file {p:?}"))?
+            std::fs::read_to_string(p).with_context(|| format!("reading subtitle file {p:?}"))
         }
-    };
+    }
+}
+
+/// Read and parse subtitle cues from a file path, or from stdin when `path` is
+/// `None` or `"-"`.
+fn read_cues(path: Option<&str>) -> Result<Vec<Cue>> {
+    let raw = read_raw(path)?;
     lib::parse(&raw).map_err(|e| anyhow!("failed to parse subtitles: {e}"))
 }
 

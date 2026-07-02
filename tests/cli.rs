@@ -285,6 +285,27 @@ fn stats_reads_from_stdin() {
 }
 
 #[test]
+fn stats_on_cueless_file_reports_zero() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("empty.srt");
+    // No cues at all (only blank lines) must report zero, not exit non-zero.
+    fs::write(&input, "   \n\n").unwrap();
+
+    let out = bin()
+        .args(["stats", input.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("cues:      0"), "got:\n{text}");
+    assert!(text.contains("first:     -"), "got:\n{text}");
+    assert!(text.contains("last:      -"), "got:\n{text}");
+    assert!(text.contains("coverage:  0.0%"), "got:\n{text}");
+}
+
+#[test]
 fn scale_doubles_timestamps() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("in.srt");

@@ -72,7 +72,9 @@ cat in.srt | srt-tools stats
 ```
 
 Prints the cue count, the first start and last end, the total span, the summed
-on-screen time, and the coverage (on-screen time as a percentage of the span):
+on-screen time, and the coverage (the fraction of the span during which at least
+one subtitle is on screen — overlapping cues are counted once, so coverage never
+exceeds 100%):
 
 ```
 cues:      3
