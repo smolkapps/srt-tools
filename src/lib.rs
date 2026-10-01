@@ -68,12 +68,17 @@ impl Timestamp {
         }
     }
 
-    /// Saturating shift: never goes below zero (a subtitle cannot start before
-    /// the start of the media).
+    /// Saturating shift: clamps to zero or `i64::MAX` milliseconds.
     pub fn shifted(self, delta_ms: i64) -> Self {
         Timestamp {
-            ms: (self.ms + delta_ms).max(0),
+            ms: self.ms.saturating_add(delta_ms).max(0),
         }
+    }
+
+    /// Shift with the same zero clamp, rejecting results above `i64::MAX`.
+    pub fn checked_shifted(self, delta_ms: i64) -> Option<Self> {
+        let ms = (i128::from(self.ms) + i128::from(delta_ms)).max(0);
+        i64::try_from(ms).ok().map(Timestamp::from_ms)
     }
 
     /// Linear scale about the origin, rounded to the nearest millisecond.
@@ -129,7 +134,15 @@ impl Timestamp {
             return Err(ParseError::BadTimestamp(raw.to_string()));
         }
 
-        Ok(Timestamp::from_hmsm(h, m, sec, ms))
+        let total = h
+            .checked_mul(60)
+            .and_then(|v| v.checked_add(m))
+            .and_then(|v| v.checked_mul(60))
+            .and_then(|v| v.checked_add(sec))
+            .and_then(|v| v.checked_mul(1000))
+            .and_then(|v| v.checked_add(ms))
+            .ok_or_else(|| ParseError::BadTimestamp(raw.to_string()))?;
+        Ok(Timestamp::from_ms(total))
     }
 
     fn components(self) -> (i64, i64, i64, i64) {
@@ -374,7 +387,8 @@ pub fn renumber(cues: &mut [Cue]) {
 }
 
 /// Shift every cue (start and end) by `delta_ms`. If `from` is given, only cues
-/// whose start is at/after `from` are moved. Times saturate at zero.
+/// whose start is at/after `from` are moved. Times saturate at zero and
+/// `i64::MAX` milliseconds.
 pub fn shift(cues: &mut [Cue], delta_ms: i64, from: Option<Timestamp>) {
     for cue in cues.iter_mut() {
         if let Some(threshold) = from {
@@ -488,11 +502,12 @@ pub fn scale(cues: &mut [Cue], factor: f64) {
 /// Concatenate multiple cue lists into one, renumbering 1..N. `offset_ms`, if
 /// non-zero, is applied cumulatively: the k-th file (0-based) is shifted by
 /// `k * offset_ms`. (A common use is to insert a fixed gap between joined
-/// files.) Cue *times* are otherwise preserved.
+/// files.) Offset arithmetic saturates at the `i64` limits, and shifted times
+/// clamp to zero or `i64::MAX`. Cue *times* are otherwise preserved.
 pub fn merge(lists: &[Vec<Cue>], offset_ms: i64) -> Vec<Cue> {
     let mut out = Vec::new();
     for (k, list) in lists.iter().enumerate() {
-        let delta = offset_ms * k as i64;
+        let delta = offset_ms.saturating_mul(i64::try_from(k).unwrap_or(i64::MAX));
         for cue in list {
             let mut c = cue.clone();
             if delta != 0 {
@@ -573,6 +588,56 @@ mod tests {
         assert!(Timestamp::parse("aa:bb:cc,ddd").is_err());
         assert!(Timestamp::parse("00:99:00,000").is_err()); // minutes out of range
         assert!(Timestamp::parse("").is_err());
+    }
+
+    #[test]
+    fn timestamp_parse_checks_the_millisecond_limit() {
+        let max = Timestamp::from_ms(i64::MAX);
+        assert_eq!(Timestamp::parse(&max.to_srt()).unwrap(), max);
+        assert_eq!(Timestamp::parse(&max.to_vtt()).unwrap(), max);
+        for raw in ["2562047788015:12:55,808", "9223372036854775807:00:00"] {
+            assert!(matches!(
+                Timestamp::parse(raw),
+                Err(ParseError::BadTimestamp(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn timestamp_shift_saturates_while_checked_shift_rejects_upper_overflow() {
+        let max = Timestamp::from_ms(i64::MAX);
+        assert_eq!(max.shifted(1), max);
+        assert_eq!(max.checked_shifted(1), None);
+        assert_eq!(
+            Timestamp::from_ms(1).checked_shifted(i64::MIN),
+            Some(Timestamp::from_ms(0))
+        );
+        assert_eq!(Timestamp::from_ms(i64::MIN).shifted(-1).ms, 0);
+        assert_eq!(
+            Timestamp::from_ms(i64::MIN).checked_shifted(-1).unwrap().ms,
+            0
+        );
+    }
+
+    #[test]
+    fn library_merge_saturates_extreme_cumulative_offsets() {
+        let cue = vec![Cue::new(
+            1,
+            Timestamp::from_ms(1000),
+            Timestamp::from_ms(2000),
+            "boundary",
+        )];
+        let lists = [cue.clone(), cue.clone(), cue];
+        for offset in [i64::MIN, i64::MAX] {
+            let merged = merge(&lists, offset);
+            assert_eq!(merged.len(), 3);
+            assert_eq!(merged[0].start.ms, 1000);
+            for cue in &merged[1..] {
+                assert_eq!(cue.start.ms, if offset < 0 { 0 } else { i64::MAX });
+                assert_eq!(cue.end.ms, cue.start.ms);
+                assert_eq!(cue.text, "boundary");
+            }
+        }
     }
 
     #[test]

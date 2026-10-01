@@ -39,6 +39,12 @@ srt-tools shift in.srt --by +1s --from 00:10:00,000 -o out.srt  # only cues at/a
 `1m` (minutes), a bare number like `2.5` (seconds), or a signed timestamp
 `HH:MM:SS,mmm`. Times never go below zero.
 
+Durations must be finite and fit in signed 64-bit milliseconds; resulting
+timestamps must also fit before output is written. Whole-number durations are
+parsed exactly. Fractional or scientific-notation durations that round to either
+64-bit boundary are rejected; use exact integer milliseconds for those limits.
+The same duration and result checks apply to cumulative `merge --offset` values.
+
 ### convert — SRT <-> VTT
 
 ```sh

@@ -119,6 +119,7 @@ fn run() -> Result<()> {
                 None => None,
             };
             let mut cues = read_cues(input.as_deref())?;
+            validate_shift(&cues, delta, from_ts)?;
             lib::shift(&mut cues, delta, from_ts);
             write_cues(&cues, output.as_deref(), None)?;
         }
@@ -149,6 +150,15 @@ fn run() -> Result<()> {
             let mut lists: Vec<Vec<Cue>> = Vec::with_capacity(inputs.len());
             for path in &inputs {
                 lists.push(read_cues(Some(path))?);
+            }
+            for (k, cues) in lists.iter().enumerate() {
+                let delta = i64::try_from(k)
+                    .ok()
+                    .and_then(|index| offset_ms.checked_mul(index))
+                    .ok_or_else(|| {
+                        anyhow!("cumulative --offset exceeds the signed millisecond range")
+                    })?;
+                validate_shift(cues, delta, None)?;
             }
             let merged = lib::merge(&lists, offset_ms);
             write_cues(&merged, output.as_deref(), None)?;
@@ -215,37 +225,56 @@ fn parse_duration(raw: &str) -> Result<i64> {
         return Ok(sign * ts.ms);
     }
 
-    let (sign, body) = split_sign(s);
-
-    let ms = if let Some(num) = body.strip_suffix("ms") {
-        let v: f64 = num
-            .trim()
-            .parse()
-            .with_context(|| format!("not a number: {num:?}"))?;
-        v.round() as i64
-    } else if let Some(num) = body.strip_suffix('s') {
-        let v: f64 = num
-            .trim()
-            .parse()
-            .with_context(|| format!("not a number: {num:?}"))?;
-        (v * 1000.0).round() as i64
-    } else if let Some(num) = body.strip_suffix('m') {
-        // minutes
-        let v: f64 = num
-            .trim()
-            .parse()
-            .with_context(|| format!("not a number: {num:?}"))?;
-        (v * 60_000.0).round() as i64
+    let (num, unit_ms) = if let Some(num) = s.strip_suffix("ms") {
+        (num.trim(), 1)
+    } else if let Some(num) = s.strip_suffix('s') {
+        (num.trim(), 1000)
+    } else if let Some(num) = s.strip_suffix('m') {
+        (num.trim(), 60_000)
     } else {
-        // bare number: seconds
-        let v: f64 = body
-            .trim()
-            .parse()
-            .with_context(|| format!("not a number: {body:?}"))?;
-        (v * 1000.0).round() as i64
+        (s, 1000) // bare number: seconds
     };
 
-    Ok(sign * ms)
+    // Keep whole-number boundaries exact; f64 rounds i64::MAX up to 2^63.
+    let (_, digits) = split_sign(num);
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        let value: i64 = num
+            .parse()
+            .context("duration exceeds the signed millisecond range")?;
+        return value
+            .checked_mul(unit_ms)
+            .ok_or_else(|| anyhow!("duration exceeds the signed millisecond range"));
+    }
+
+    let value: f64 = num
+        .parse()
+        .with_context(|| format!("not a number: {num:?}"))?;
+    let ms = (value * unit_ms as f64).round();
+    if !ms.is_finite() {
+        bail!("duration must be finite");
+    }
+    // Reject float boundaries: nearby out-of-range text can round onto them.
+    // Exact whole-number durations above still support both i64 limits.
+    if ms <= i64::MIN as f64 || ms >= -(i64::MIN as f64) {
+        bail!("duration exceeds the signed millisecond range");
+    }
+    Ok(ms as i64)
+}
+
+/// Validate both endpoints of the same original-start-selected cues as `shift`.
+/// Finish this check before transforming cues or opening an output destination.
+fn validate_shift(cues: &[Cue], delta_ms: i64, from: Option<Timestamp>) -> Result<()> {
+    for cue in cues {
+        if from.is_some_and(|threshold| cue.start < threshold) {
+            continue;
+        }
+        if cue.start.checked_shifted(delta_ms).is_none()
+            || cue.end.checked_shifted(delta_ms).is_none()
+        {
+            bail!("shifted cue {} exceeds the timestamp range", cue.index);
+        }
+    }
+    Ok(())
 }
 
 /// Render [`Stats`] as an aligned, human-readable report (trailing newline).
@@ -356,4 +385,49 @@ fn write_cues(cues: &[Cue], output: Option<&str>, forced: Option<Format>) -> Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_units_signs_and_rounding_are_preserved() {
+        for (raw, expected) in [
+            ("+2.5s", 2500),
+            ("-1.2s", -1200),
+            ("1200ms", 1200),
+            ("-0.5ms", -1),
+            ("1m", 60_000),
+            ("2.5", 2500),
+            ("-00:00:02,500", -2500),
+            ("1e-3s", 1),
+        ] {
+            assert_eq!(parse_duration(raw).unwrap(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn duration_integer_limits_are_exact_and_float_boundaries_are_rejected() {
+        assert_eq!(parse_duration("9223372036854775807ms").unwrap(), i64::MAX);
+        assert_eq!(parse_duration("-9223372036854775808ms").unwrap(), i64::MIN);
+        assert_eq!(
+            parse_duration("9.223372036854775e18ms").unwrap(),
+            9_223_372_036_854_774_784
+        );
+        for raw in [
+            "NaN",
+            "inf",
+            "-inf",
+            "1e300m",
+            "9223372036854775808ms",
+            "-9223372036854775809ms",
+            "-9223372036854775808.0ms",
+            "-9223372036854775809.0ms",
+            "-9.223372036854776e18ms",
+            "9.223372036854776e18ms",
+        ] {
+            assert!(parse_duration(raw).is_err(), "{raw}");
+        }
+    }
 }

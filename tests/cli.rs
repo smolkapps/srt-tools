@@ -369,10 +369,11 @@ fn malformed_input_exits_nonzero_with_clear_stderr() {
 #[test]
 fn empty_input_exits_nonzero() {
     bin()
-        .args(["fix", "--by", "+1s"]) // wrong flag too, but empty stdin is the point
+        .args(["fix"])
         .write_stdin("   \n\n")
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicate::str::contains("input contained no subtitle cues"));
 }
 
 #[test]
