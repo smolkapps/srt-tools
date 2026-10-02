@@ -15,10 +15,28 @@ exact and lossless.
 
 ## Install
 
+For Linux x86_64, download the versioned binary and verify its checksum before
+installing it into your user account:
+
 ```sh
-cargo build --release
+curl -fLO https://github.com/smolkapps/srt-tools/releases/download/v0.1.1/srt-tools-linux-x86_64
+curl -fLO https://github.com/smolkapps/srt-tools/releases/download/v0.1.1/SHA256SUMS
+sha256sum --check SHA256SUMS
+install -Dm755 srt-tools-linux-x86_64 "$HOME/.local/bin/srt-tools"
+"$HOME/.local/bin/srt-tools" --version
+```
+
+Other platforms can build from the tagged source with Rust installed:
+
+```sh
+git clone --branch v0.1.1 --depth 1 https://github.com/smolkapps/srt-tools.git
+cd srt-tools
+cargo build --release --locked
 # binary at target/release/srt-tools
 ```
+
+The Linux binary is unsigned. `SHA256SUMS` verifies the downloaded bytes;
+`PROVENANCE.json` records the exact source commit and build toolchain.
 
 ## Usage
 
